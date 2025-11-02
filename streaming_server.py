@@ -8,13 +8,14 @@ import threading
 import sqlite3
 import pandas as pd
 import joblib
-# import pyttsx3 # 더 이상 사용하지 않음
+
 import os
 import json
-import numpy as np
+
 import queue # TTS 작업 대기줄
 from gtts import gTTS # --- [핵심 수정] gTTS import ---
-import io # --- [핵심 수정] MP3 파일을 메모리에서 다루기 위해 import ---
+
+
 from plyer import notification
 
 # --- Flask 앱 및 상태 변수 초기화 ---
@@ -35,6 +36,7 @@ user_stats = {
     'level': 1, 'experience': 0, 'current_streak': 0,
     'best_streak': 0, 'total_good_minutes': 0, 'badges': [], 'last_activity': None
 }
+last_seen_landmarks = None
 
 # --- 통계 저장을 위한 전역 변수 ---
 last_prediction = 0
@@ -114,27 +116,23 @@ pose = mp.solutions.pose.Pose(min_detection_confidence=0.5, min_tracking_confide
 mp_drawing = mp.solutions.drawing_utils
 
 # --- DB 관련 함수 ---
+# [교체] init_db 함수 전체
 def init_db():
     conn = sqlite3.connect('posture_data.db', check_same_thread=False)
     cursor = conn.cursor()
-    # 모든 테이블 생성 쿼리
+    
+    # --- [유지] 현재 사용 중인 테이블 6개 ---
     cursor.execute(''' CREATE TABLE IF NOT EXISTS posture_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, right_ear_x REAL, right_ear_y REAL, right_shoulder_x REAL, right_shoulder_y REAL, label INTEGER) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS daily_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT UNIQUE NOT NULL, good_seconds INTEGER NOT NULL, bad_seconds INTEGER NOT NULL) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS posture_types_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, posture_type TEXT NOT NULL, confidence REAL NOT NULL, landmarks_data TEXT NOT NULL) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS user_gamification (id INTEGER PRIMARY KEY AUTOINCREMENT, user_level INTEGER DEFAULT 1, experience_points INTEGER DEFAULT 0, current_streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, total_good_minutes INTEGER DEFAULT 0, badges TEXT DEFAULT '[]', last_activity DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS smart_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, notification_type TEXT NOT NULL, trigger_time TEXT NOT NULL, is_active BOOLEAN DEFAULT 1, last_triggered DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP) ''')
-    cursor.execute(''' CREATE TABLE IF NOT EXISTS posture_patterns (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, hour INTEGER NOT NULL, posture_type TEXT NOT NULL, frequency INTEGER DEFAULT 1, UNIQUE(date, hour, posture_type)) ''')
+    
     cursor.execute('''CREATE TABLE IF NOT EXISTS goals (id INTEGER PRIMARY KEY AUTOINCREMENT, goal_type TEXT NOT NULL, target_value REAL NOT NULL, current_value REAL DEFAULT 0, start_date TEXT NOT NULL, end_date TEXT NOT NULL, is_active BOOLEAN DEFAULT 1, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS user_points (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT DEFAULT 'default', total_points INTEGER DEFAULT 0, daily_points INTEGER DEFAULT 0, weekly_points INTEGER DEFAULT 0, monthly_points INTEGER DEFAULT 0, last_updated DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS badges (id INTEGER PRIMARY KEY AUTOINCREMENT, badge_name TEXT NOT NULL, badge_description TEXT NOT NULL, badge_icon TEXT NOT NULL, required_points INTEGER NOT NULL, category TEXT NOT NULL)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS user_badges (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT DEFAULT 'default', badge_id INTEGER NOT NULL, earned_date DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (badge_id) REFERENCES badges (id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, challenge_name TEXT NOT NULL, challenge_description TEXT NOT NULL, challenge_type TEXT NOT NULL, target_value REAL NOT NULL, reward_points INTEGER NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, is_active BOOLEAN DEFAULT 1)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS user_challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT DEFAULT 'default', challenge_id INTEGER NOT NULL, current_progress REAL DEFAULT 0, is_completed BOOLEAN DEFAULT 0, completed_date DATETIME, FOREIGN KEY (challenge_id) REFERENCES challenges (id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS wearable_devices (id INTEGER PRIMARY KEY AUTOINCREMENT, device_name TEXT NOT NULL, device_type TEXT NOT NULL, device_id TEXT UNIQUE NOT NULL, is_connected BOOLEAN DEFAULT 0, last_sync DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS wearable_data (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, data_type TEXT NOT NULL, data_value REAL NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (device_id) REFERENCES wearable_devices (device_id))''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS wearable_notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL, notification_type TEXT NOT NULL, is_enabled BOOLEAN DEFAULT 1, vibration_pattern TEXT DEFAULT 'short', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (device_id) REFERENCES wearable_devices (device_id))''')
+    
     conn.commit()
     conn.close()
+
 
 def save_to_db(landmarks, label):
     conn = sqlite3.connect('posture_data.db', check_same_thread=False)
@@ -361,6 +359,9 @@ def generate_frames():
         frame = cv2.flip(frame, 1)
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = pose.process(frame_rgb)
+        global last_seen_landmarks
+        if results.pose_landmarks:
+            last_seen_landmarks = results.pose_landmarks.landmark
         
         with lock:
             current_mode = app_state['mode']; end_time = app_state['collection_end_time']
@@ -466,31 +467,42 @@ def reload_model():
     return jsonify({"status": "success", "message": "Model reloaded"})
 
 @app.route('/clear_data', methods=['POST'])
+# [교체] clear_data 함수 전체
+@app.route('/clear_data', methods=['POST'])
 def clear_data():
     try:
         conn = sqlite3.connect('posture_data.db', check_same_thread=False)
         cursor = conn.cursor()
-        cursor.execute('DELETE FROM posture_log'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="posture_log"')
-        cursor.execute('DELETE FROM daily_stats'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="daily_stats"')
-        cursor.execute('DELETE FROM posture_types_log'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="posture_types_log"')
-        cursor.execute('DELETE FROM user_gamification'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="user_gamification"')
-        cursor.execute('DELETE FROM smart_notifications'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="smart_notifications"')
-        cursor.execute('DELETE FROM posture_patterns'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="posture_patterns"')
-        cursor.execute('DELETE FROM goals'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="goals"')
-        cursor.execute('DELETE FROM user_points'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="user_points"')
-        cursor.execute('DELETE FROM user_badges'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="user_badges"')
-        cursor.execute('DELETE FROM challenges'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="challenges"')
-        cursor.execute('DELETE FROM user_challenges'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="user_challenges"')
-        cursor.execute('DELETE FROM wearable_devices'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="wearable_devices"')
-        cursor.execute('DELETE FROM wearable_data'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="wearable_data"')
-        cursor.execute('DELETE FROM wearable_notifications'); cursor.execute('DELETE FROM sqlite_sequence WHERE name="wearable_notifications"')
+        
+        # --- [유지] 6개 테이블 초기화 ---
+        cursor.execute('DELETE FROM posture_log'); 
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name="posture_log"')
+        cursor.execute('DELETE FROM daily_stats'); 
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name="daily_stats"')
+        cursor.execute('DELETE FROM posture_types_log'); 
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name="posture_types_log"')
+        cursor.execute('DELETE FROM user_gamification'); 
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name="user_gamification"')
+        cursor.execute('DELETE FROM smart_notifications'); 
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name="smart_notifications"')
+        cursor.execute('DELETE FROM goals'); 
+        cursor.execute('DELETE FROM sqlite_sequence WHERE name="goals"')
+    
+        
+    
+        
         conn.commit(); conn.close()
+        
         global good_time_today, bad_time_today
         good_time_today, bad_time_today = 0, 0
         load_user_gamification() # 게임화 상태 초기화
-        print("✅ 데이터베이스가 초기화되었습니다."); return jsonify({"status": "success", "message": "Database cleared"})
+        
+        print("✅ 데이터베이스가 초기화되었습니다."); 
+        return jsonify({"status": "success", "message": "Database cleared"})
+        
     except Exception as e:
-        print(f"⚠️ 데이터베이스 초기화 오류: {e}"); return jsonify({"error": str(e)}), 500
+        print(f"⚠️ 데이터베이스 초기화 오류: {e}"); 
+        return jsonify({"error": str(e)}), 500
         
 @app.route('/set_sound', methods=['POST'])
 def set_sound():
@@ -536,7 +548,30 @@ def get_user_stats():
     global user_stats
     return jsonify({"status": "success", "stats": user_stats})
 
-# [추가] @app.route('/get_user_stats', ...) 함수 바로 아래에 이 코드를 추가하세요.
+# --- [신규 추가] Human-in-the-Loop 피드백 저장 API ---
+@app.route('/save_feedback', methods=['POST'])
+def save_feedback():
+    global last_seen_landmarks
+    data = request.get_json()
+    label = data.get('label') # 사용자가 누른 버튼 (0: 좋음, 1: 나쁨)
+
+    if label not in [0, 1]:
+        return jsonify({"status": "error", "message": "Invalid label"}), 400
+    
+    try:
+        with lock: # 랜드마크가 갱신되는 도중에 읽지 않도록 잠금
+            if last_seen_landmarks is None:
+                return jsonify({"status": "error", "message": "No landmarks captured yet"}), 400
+            
+            # (중요) 현재 랜드마크와 "사용자가 알려준 정답(label)"을 학습DB에 저장
+            save_to_db(last_seen_landmarks, label) 
+        
+        print(f"✅ Human-in-the-Loop 피드백 저장 완료: Label={label}")
+        return jsonify({"status": "success", "message": f"Feedback {label} saved"})
+        
+    except Exception as e:
+        print(f"⚠️ 피드백 저장 오류: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # --- [신규 추가] 리워드 교환 엔드포인트 ---
 @app.route('/redeem_reward', methods=['POST'])
@@ -625,21 +660,7 @@ def analyze_patterns():
         return jsonify({"status": "success", "worst_hours": worst_hours})
     except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/wearable_notification', methods=['POST'])
-def wearable_notification():
-    data = request.get_json()
-    device_id = data.get('device_id', ''); notification_type = data.get('notification_type', ''); message = data.get('message', '')
-    if not device_id or not message: return jsonify({"status": "error", "message": "Missing required parameters"}), 400
-    print(f"⌚ Wearable notification to {device_id}: {message}")
-    return jsonify({"status": "success", "message": "Wearable notification sent", "device_id": device_id, "notification_type": notification_type})
 
-@app.route('/wearable_sync', methods=['POST'])
-def wearable_sync():
-    data = request.get_json()
-    device_id = data.get('device_id', ''); data_type = data.get('data_type', ''); data_value = data.get('data_value', 0)
-    if not device_id or not data_type: return jsonify({"status": "error", "message": "Missing required parameters"}), 400
-    print(f"⌚ Wearable data sync: {device_id} - {data_type}: {data_value}")
-    return jsonify({"status": "success", "message": "Wearable data synced", "device_id": device_id, "data_type": data_type, "data_value": data_value})
 
 @app.route('/set_desktop_alert', methods=['POST'])
 def set_desktop_alert():

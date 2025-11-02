@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 import joblib
 import os
 import datetime
-import json
+
 import numpy as np # Confusion Matrix 라벨링 위해 추가
 
 # --- 페이지 설정 ---
@@ -213,8 +213,7 @@ def train_and_save_model():
         y_pred = model.predict(X_test); accuracy = accuracy_score(y_test, y_pred)
         joblib.dump(model, 'posture_model.joblib')
         st.success(f"✅ AI 모델 학습 완료! (예측 정확도: {accuracy * 100:.2f}%)")
-        st.info("💡 서버가 새 모델을 사용하도록 '모델 새로고침' 버튼을 꼭 눌러주세요.")
-
+       
 # --- 데이터 시각화 함수들 (Plotly 크기 직접 지정 + config 추가) ---
 def create_hourly_line_chart(df):
     try:
@@ -490,8 +489,8 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 # --- AI 모델 설정 탭 ---
 # --- [교체] 기존 tab1 블록 전체를 아래 코드로 교체 ---
 
-# --- AI 모델 설정 탭 ---
-# --- [교체] 기존 tab1 블록 전체를 아래 코드로 교체 ---
+
+
 
 # --- AI 모델 설정 탭 ---
 with tab1:
@@ -578,6 +577,35 @@ with tab1:
             if st.button("🔄 모델 새로고침"):
                 try: requests.post(f"{FLASK_SERVER_URL}/reload_model"); st.success("✅ 서버 모델 새로고침 완료!")
                 except: st.error("⚠️ 서버 연결 실패")
+
+            # --- [신규 추가] 자동 재학습 및 평가 버튼 ---
+            st.divider()
+            st.subheader("3. AI 자동 재학습 (Human-in-the-Loop)")
+            st.info("실시간 코칭 중 'AI 피드백' 버튼으로 '오답 노트'를 충분히 모은 뒤, 이 버튼을 눌러 AI를 더 똑똑하게 만드세요.")
+            
+            if st.button("🚀 최신 피드백으로 AI 자동 재학습/평가", use_container_width=True):
+                
+                # 1. 모든 데이터 불러오기 (초기 데이터 + 피드백 데이터)
+                with st.spinner("⏳ (1/4) 모든 학습 데이터를 불러오는 중..."):
+                    df = load_data()
+                    if df.empty or len(df) < 50:
+                        st.error("⚠️ 데이터가 부족합니다. '좋은/나쁜 자세' 데이터를 더 수집해주세요.")
+                        st.stop() # 작업 중단
+                    
+                    st.success(f"✅ 총 {len(df)}개의 학습 데이터를 불러왔습니다.")
+        
+                train_and_save_model() 
+                
+
+                # 4. 서버에 새 모델 적용
+                with st.spinner("⏳ (4/4) 똑똑해진 새 모델을 서버에 적용 중..."):
+                    try:
+                        requests.post(f"{FLASK_SERVER_URL}/reload_model")
+                        st.success("✅ 모든 작업 완료! 서버에 새 모델이 적용되었습니다.")
+                        st.balloons()
+                    except Exception as e:
+                        st.error("⚠️ 서버에 새 모델 적용을 실패했습니다. 서버를 확인하세요.")
+            # --- [신규 추가 완료] ---
         else:
             st.info("ℹ️ 데이터 수집 및 모델 학습을 위해 먼저 웹캠을 켜주세요.")
 
@@ -671,14 +699,31 @@ with tab3:
         if voice_feedback_toggle != st.session_state.voice_feedback_on:
             try: requests.post(f"{FLASK_SERVER_URL}/set_voice_feedback", json={"enabled": voice_feedback_toggle}); st.session_state.voice_feedback_on = voice_feedback_toggle; st.toast(f"음성 피드백 {'ON' if voice_feedback_toggle else 'OFF'}")
             except: st.error("⚠️ 서버 연결 실패 (음성 피드백 설정)")
+            
+        # --- [신규 추가] Human-in-the-Loop 피드백 버튼 ---
+        st.divider()
+        st.subheader("🤖 AI 피드백 (Human-in-the-Loop)")
+        st.caption("AI의 판단이 틀렸나요? 지금 바로 '정답'을 알려주세요!")
         
-        # --- [수정] 음성 피드백 테스트 버튼 제거 ---
-        # if st.button("🗣️ 음성 피드백 테스트", use_container_width=True):
-        #     test_message = "음성 피드백 테스트입니다. 자세를 바르게 유지해주세요."
-        #     if send_voice_feedback(test_message):
-        #         st.success("✅ 음성 피드백 테스트가 재생되었습니다.")
-        #     else:
-        #         st.warning("⚠️ 음성 피드백을 재생할 수 없습니다. 서버를 확인해주세요.")
+        col_fb1, col_fb2 = st.columns(2)
+        with col_fb1:
+            if st.button("👍 (AI틀림) 지금 자세 좋아요!", use_container_width=True, help="AI가 '나쁨'이라고 했지만, 실제론 '좋은' 자세일 때"):
+                try:
+                    # 서버에 "지금 랜드마크는 label=0 이야"라고 전송
+                    requests.post(f"{FLASK_SERVER_URL}/save_feedback", json={"label": 0})
+                    st.toast("✅ '좋은 자세' 피드백이 '오답 노트'에 저장되었습니다!")
+                except Exception as e:
+                    st.error("⚠️ 피드백 전송 실패. 서버를 확인하세요.")
+        with col_fb2:
+            if st.button("👎 (AI틀림) 지금 자세 나빠요!", use_container_width=True, help="AI가 '좋음'이라고 했지만, 실제론 '나쁜' 자세일 때"):
+                try:
+                    # 서버에 "지금 랜드마크는 label=1 이야"라고 전송
+                    requests.post(f"{FLASK_SERVER_URL}/save_feedback", json={"label": 1})
+                    st.toast("❌ '나쁜 자세' 피드백이 '오답 노트'에 저장되었습니다!")
+                except Exception as e:
+                    st.error("⚠️ 피드백 전송 실패. 서버를 확인하세요.")
+        # --- [신규 추가 완료] ---
+
 
     with col_video_coach:
         st.subheader("📹 실시간 코칭 영상")
