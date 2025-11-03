@@ -13,6 +13,13 @@ import datetime
 from datetime import date # [신규 추가]
 from dateutil.relativedelta import relativedelta # [신규 추가]
 import numpy as np # Confusion Matrix 라벨링 위해 추가
+from imblearn.over_sampling import SMOTE # [신규 추가]
+from collections import Counter # [신규 추가]
+
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from imblearn.over_sampling import SMOTE # [신규 추가]
+from collections import Counter # [신규 추가]
+
 
 # --- 페이지 설정 ---
 st.set_page_config(page_title="AI 자세 교정 코치", page_icon="🧘", layout="wide")
@@ -245,19 +252,76 @@ def load_data(start_date=None, end_date=None):
         st.error(f"⚠️ 데이터베이스 로딩 중 오류가 발생했습니다: {e}")
         return pd.DataFrame()
 
+# [교체] train_and_save_model 함수 전체 (이상탐지, 오버샘플링 적용)
 def train_and_save_model():
-    df = load_data()
-    if len(df) < 50 or len(df['label'].unique()) < 2:
-        st.warning("⚠️ 모델 학습을 위해 좋은 자세(0)와 나쁜 자세(1) 데이터가 각각 최소 25개 이상 필요합니다."); return
-    with st.spinner("⏳ AI 모델 학습을 시작합니다..."):
+    df = load_data() # 1. 모든 데이터 로드 (피드백 포함)
+    
+    if len(df) < 50: # 데이터가 너무 적으면 중지
+        st.warning("⚠️ 모델 학습을 위해 최소 50개 이상의 데이터가 필요합니다."); return
+    if len(df['label'].unique()) < 2:
+        st.warning("⚠️ 좋은 자세(0)와 나쁜 자세(1) 데이터가 모두 필요합니다."); return
+
+    with st.spinner("⏳ AI 모델 학습을 시작합니다... (1/5)"):
+        # --- 2. 특성 공학 ---
         df['shoulder_ear_diff_x'] = df['right_shoulder_x'] - df['right_ear_x']
         features = ['right_ear_x', 'right_ear_y', 'right_shoulder_x', 'right_shoulder_y', 'shoulder_ear_diff_x']
         X = df[features]; y = df['label']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-        model = RandomForestClassifier(n_estimators=100, random_state=42); model.fit(X_train, y_train)
-        y_pred = model.predict(X_test); accuracy = accuracy_score(y_test, y_pred)
+        
+        st.info(f"✅ (1/5) 총 {len(df)}개 데이터 로드 완료.")
+
+    with st.spinner("⏳ (2/5) 악의적 데이터(이상치) 제거 중..."):
+        # --- 3. [신규] 이상탐지 (IsolationForest) 적용 ---
+        # "contamination=0.05" -> 전체 데이터 중 5%를 이상치로 간주하여 제거
+        iso = IsolationForest(contamination=0.05, random_state=42)
+        y_iso = iso.fit_predict(X)
+        
+        # -1이 이상치, 1이 정상 데이터
+        mask = (y_iso == 1) 
+        X_clean = X[mask]
+        y_clean = y[mask]
+        
+        removed_count = len(X) - len(X_clean)
+        st.info(f"✅ (2/5) 이상치 {removed_count}개 제거 완료! (총 {len(X_clean)}개 데이터 사용)")
+
+    with st.spinner("⏳ (3/5) 학습/테스트 데이터 분리 중..."):
+        # --- 4. 훈련/테스트 데이터 분리 ---
+        # (주의!) 오버샘플링 전에 반드시 데이터를 분리해야 함
+        X_train, X_test, y_train, y_test = train_test_split(X_clean, y_clean, test_size=0.2, random_state=42, stratify=y_clean)
+        
+        st.info(f"✅ (3/5) 학습 데이터: {len(X_train)}개, 테스트 데이터: {len(X_test)}개")
+
+    with st.spinner("⏳ (4/5) 데이터 불균형 해소(Oversampling) 중..."):
+        # --- 5. [신규] 오버샘플링 (SMOTE) 적용 ---
+        # (주의!) 훈련 데이터(X_train, y_train)에만 적용해야 함
+        
+        # 불균형 데이터 개수 확인
+        st.info(f"Oversampling 전 (학습 데이터): {Counter(y_train)}")
+        
+        # SMOTE 적용
+        try:
+            smote = SMOTE(random_state=42)
+            X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+            st.info(f"Oversampling 후 (학습 데이터): {Counter(y_train_res)}")
+        except ValueError as e:
+            # (예외처리) 한쪽 라벨 데이터가 너무 적어(예: 5개 미만) SMOTE가 실패할 경우
+            st.warning(f"⚠️ 오버샘플링(SMOTE) 실패: {e}. 원본 데이터로 학습합니다.")
+            X_train_res, y_train_res = X_train, y_train # 원본 사용
+
+    with st.spinner("⏳ (5/5) AI 모델 학습 및 평가 중..."):
+        # --- 6. 모델 학습 및 저장 ---
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        
+        # [수정] SMOTE로 처리된 데이터로 학습
+        model.fit(X_train_res, y_train_res) 
+        
+        # [유지] 평가는 원본 테스트 데이터(X_test)로 수행
+        y_pred = model.predict(X_test)
+        accuracy = accuracy_score(y_test, y_pred)
+        
         joblib.dump(model, 'posture_model.joblib')
+        
         st.success(f"✅ AI 모델 학습 완료! (예측 정확도: {accuracy * 100:.2f}%)")
+        st.info("💡 '모델 새로고침' 버튼을 눌러 서버에 적용하세요!")
        
 # --- 데이터 시각화 함수들 (Plotly 크기 직접 지정 + config 추가) ---
 def create_hourly_line_chart(df):
