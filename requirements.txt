@@ -1,0 +1,14 @@
+flask
+streamlit
+pandas
+requests
+plotly
+scikit-learn
+joblib
+numpy
+imbalanced-learn
+opencv-python
+mediapipe
+gtts
+plyer
+playsound==1.2.2

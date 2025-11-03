@@ -381,42 +381,7 @@ def create_scatter_plot(df):
             """)
     except Exception as e: st.error(f"⚠️ AI 판단 기준 그래프 오류: {e}")
 
-# [교체] create_daily_stacked_bar_chart 함수 전체
-def create_daily_stacked_bar_chart(start_date, end_date):
-    try:
-        # [수정] SQL 쿼리에 WHERE 절 추가
-        conn = sqlite3.connect('posture_data.db', check_same_thread=False)
-        query = "SELECT * from daily_stats WHERE date BETWEEN ? AND ? ORDER BY date ASC"
-        stats_df = pd.read_sql_query(query, conn, params=(start_date, end_date))
-        conn.close()
-        
-        if stats_df.empty: 
-            st.info("ℹ️ 해당 기간의 일일 통계 데이터가 없습니다.")
-            return # [추가] 데이터 없으면 함수 종료
-        else:
-            stats_df['good_minutes'] = stats_df['good_seconds'] / 60
-            stats_df['bad_minutes'] = stats_df['bad_seconds'] / 60
-            avg_good_min = stats_df['good_minutes'].mean()
-            avg_bad_min = stats_df['bad_minutes'].mean()
-            col1, col2 = st.columns(2)
-            col1.metric(label="📊 평균 좋은 자세", value=f"{avg_good_min:.1f} 분/일")
-            col2.metric(label="📊 평균 나쁜 자세", value=f"{avg_bad_min:.1f} 분/일")
-            
-            plot_df = stats_df.melt(id_vars=['date'], value_vars=['good_minutes', 'bad_minutes'], var_name='status', value_name='minutes')
-            fig = px.bar(plot_df, x='date', y='minutes', color='status', title='날짜별 자세 유지 시간 (누적)', 
-                         labels={'date': '날짜', 'minutes': '시간(분)', 'status': '자세'}, 
-                         color_discrete_map={'good_minutes': '#4CAF50', 'bad_minutes': '#F44336'})
-            fig.update_layout(width=600, height=300, title_font_size=16)
-            st.plotly_chart(fig, config={'displayModeBar': True})
-            
-            with st.expander("🗓️ 해석"):
-                st.markdown(f"""
-                이 그래프는 '실시간 AI 코칭' 기능을 사용한 날짜별로 **총 몇 분 동안 좋은 자세와 나쁜 자세를 유지했는지** 누적하여 보여줍니다.
-                - 선택한 기간 동안, 평균적으로 하루에 **{avg_good_min:.1f}분** 동안 좋은 자세를, **{avg_bad_min:.1f}분** 동안 나쁜 자세를 유지했습니다.
-                - 이 추세를 통해 장기적인 자세 개선 효과를 확인할 수 있습니다.
-                """)
-    except Exception as e: 
-        st.error(f"⚠️ 일일 통계 그래프 오류: {e}")
+
 
 
 def create_confusion_matrix_plot(df):
@@ -757,9 +722,7 @@ with tab1:
         else:
             st.info("ℹ️ 웹캠을 시작하려면 '▶️ 웹캠 켜기' 버튼을 눌러주세요.")
             
-# --- 자세 분석 리포트 탭 ---
-# [교체] tab2 블록 전체
-# --- 자세 분석 리포트 탭 ---
+
 with tab2:
     st.header("📊 자세 분석 리포트")
     
@@ -781,19 +744,16 @@ with tab2:
         st.caption(f"&nbsp; \n &nbsp; \n 선택된 기간: **{start_date}** ~ **{end_date}**")
     # --- [신규 추가 완료] ---
     
-    chart_options = ['일일 통계 (누적)', '자세 유형별 분석', '패턴 분석 리포트', '시간대별 추세', '자세 데이터 개수', 'AI 판단 기준', '모델 성능 분석']
+    chart_options = ['자세 유형별 분석', '패턴 분석 리포트', '시간대별 추세', '자세 데이터 개수', 'AI 판단 기준', '모델 성능 분석']
     selected_chart = st.selectbox("분석 차트 선택:", options=chart_options, label_visibility="collapsed")
             
     st.divider()
     
     # [수정] 필터링된 날짜로 학습 데이터를 로드합니다 (차트용)
     df_filtered = load_data(start_date, end_date) 
+
     
-    if selected_chart == '일일 통계 (누적)':
-        # [수정] 날짜 인자 전달
-        create_daily_stacked_bar_chart(start_date, end_date) 
-        
-    elif selected_chart == '자세 유형별 분석':
+    if selected_chart == '자세 유형별 분석':
         # [수정] 날짜 인자 전달
         create_posture_types_chart(start_date, end_date)
         
