@@ -10,7 +10,8 @@ from sklearn.metrics import accuracy_score, confusion_matrix, classification_rep
 import joblib
 import os
 import datetime
-
+from datetime import date # [신규 추가]
+from dateutil.relativedelta import relativedelta # [신규 추가]
 import numpy as np # Confusion Matrix 라벨링 위해 추가
 
 # --- 페이지 설정 ---
@@ -19,6 +20,32 @@ st.set_page_config(page_title="AI 자세 교정 코치", page_icon="🧘", layou
 FLASK_SERVER_URL = "http://127.0.0.1:5000"
 
 # --- 함수 정의 ---
+def get_date_range(option):
+    """선택한 옵션에 따라 시작일과 종료일을 반환합니다."""
+    today = date.today()
+    
+    if option == "오늘":
+        start_date = today
+        end_date = today
+    elif option == "최근 7일":
+        start_date = today - datetime.timedelta(days=6)
+        end_date = today
+    elif option == "최근 30일":
+        start_date = today - datetime.timedelta(days=29)
+        end_date = today
+    elif option == "이번 달":
+        start_date = today.replace(day=1)
+        end_date = today
+    elif option == "지난 달":
+        last_month_end = today.replace(day=1) - datetime.timedelta(days=1)
+        start_date = last_month_end.replace(day=1)
+        end_date = last_month_end
+    elif option == "전체 기간":
+        start_date = date(2020, 1, 1) # (아주 먼 과거)
+        end_date = today
+    
+    # .isoformat()으로 'YYYY-MM-DD' 형식의 문자열로 반환
+    return start_date.isoformat(), end_date.isoformat()
 
 # --- 새로운 기능: 자세 교정 운동 가이드 ---
 def get_exercise_guide():
@@ -191,11 +218,29 @@ def clear_database():
         st.error(f"⚠️ 데이터베이스 초기화 중 알 수 없는 오류 발생: {e}")
         return False # 실패
     
-def load_data():
+# [교체] load_data 함수 전체
+def load_data(start_date=None, end_date=None):
+    """
+    posture_log 테이블에서 데이터를 로드합니다.
+    날짜 범위가 주어지면 해당 기간의 데이터만 필터링합니다.
+    """
     try:
         conn = sqlite3.connect('posture_data.db', check_same_thread=False)
-        df = pd.read_sql_query("SELECT * from posture_log WHERE label IS NOT NULL", conn)
-        conn.close(); return df
+        
+        # 날짜 범위가 없으면 (예: tab1에서 학습 시) 모든 데이터를 로드
+        if start_date is None or end_date is None:
+            query = "SELECT * from posture_log WHERE label IS NOT NULL"
+            params = ()
+        # 날짜 범위가 있으면 (예: tab2에서 리포트 시) 데이터 필터링
+        else:
+            # [수정] date() 함수를 사용해 timestamp의 날짜 부분만 비교
+            query = "SELECT * from posture_log WHERE label IS NOT NULL AND date(timestamp) BETWEEN ? AND ?"
+            params = (start_date, end_date)
+            
+        df = pd.read_sql_query(query, conn, params=params)
+        conn.close()
+        return df
+        
     except Exception as e:
         st.error(f"⚠️ 데이터베이스 로딩 중 오류가 발생했습니다: {e}")
         return pd.DataFrame()
@@ -272,25 +317,43 @@ def create_scatter_plot(df):
             """)
     except Exception as e: st.error(f"⚠️ AI 판단 기준 그래프 오류: {e}")
 
-def create_daily_stacked_bar_chart():
+# [교체] create_daily_stacked_bar_chart 함수 전체
+def create_daily_stacked_bar_chart(start_date, end_date):
     try:
-        conn = sqlite3.connect('posture_data.db', check_same_thread=False); stats_df = pd.read_sql_query("SELECT * from daily_stats ORDER BY date ASC", conn); conn.close()
-        if stats_df.empty: st.info("ℹ️ 일일 통계 데이터 없음.")
+        # [수정] SQL 쿼리에 WHERE 절 추가
+        conn = sqlite3.connect('posture_data.db', check_same_thread=False)
+        query = "SELECT * from daily_stats WHERE date BETWEEN ? AND ? ORDER BY date ASC"
+        stats_df = pd.read_sql_query(query, conn, params=(start_date, end_date))
+        conn.close()
+        
+        if stats_df.empty: 
+            st.info("ℹ️ 해당 기간의 일일 통계 데이터가 없습니다.")
+            return # [추가] 데이터 없으면 함수 종료
         else:
-            stats_df['good_minutes'] = stats_df['good_seconds'] / 60; stats_df['bad_minutes'] = stats_df['bad_seconds'] / 60
-            avg_good_min = stats_df['good_minutes'].mean(); avg_bad_min = stats_df['bad_minutes'].mean()
-            col1, col2 = st.columns(2); col1.metric(label="📊 평균 좋은 자세", value=f"{avg_good_min:.1f} 분/일"); col2.metric(label="📊 평균 나쁜 자세", value=f"{avg_bad_min:.1f} 분/일")
+            stats_df['good_minutes'] = stats_df['good_seconds'] / 60
+            stats_df['bad_minutes'] = stats_df['bad_seconds'] / 60
+            avg_good_min = stats_df['good_minutes'].mean()
+            avg_bad_min = stats_df['bad_minutes'].mean()
+            col1, col2 = st.columns(2)
+            col1.metric(label="📊 평균 좋은 자세", value=f"{avg_good_min:.1f} 분/일")
+            col2.metric(label="📊 평균 나쁜 자세", value=f"{avg_bad_min:.1f} 분/일")
+            
             plot_df = stats_df.melt(id_vars=['date'], value_vars=['good_minutes', 'bad_minutes'], var_name='status', value_name='minutes')
-            fig = px.bar(plot_df, x='date', y='minutes', color='status', title='날짜별 자세 유지 시간 (누적)', labels={'date': '날짜', 'minutes': '시간(분)', 'status': '자세'}, color_discrete_map={'good_minutes': '#4CAF50', 'bad_minutes': '#F44336'})
+            fig = px.bar(plot_df, x='date', y='minutes', color='status', title='날짜별 자세 유지 시간 (누적)', 
+                         labels={'date': '날짜', 'minutes': '시간(분)', 'status': '자세'}, 
+                         color_discrete_map={'good_minutes': '#4CAF50', 'bad_minutes': '#F44336'})
             fig.update_layout(width=600, height=300, title_font_size=16)
             st.plotly_chart(fig, config={'displayModeBar': True})
+            
             with st.expander("🗓️ 해석"):
                 st.markdown(f"""
                 이 그래프는 '실시간 AI 코칭' 기능을 사용한 날짜별로 **총 몇 분 동안 좋은 자세와 나쁜 자세를 유지했는지** 누적하여 보여줍니다.
-                - 평균적으로 하루에 **{avg_good_min:.1f}분** 동안 좋은 자세를, **{avg_bad_min:.1f}분** 동안 나쁜 자세를 유지했습니다.
+                - 선택한 기간 동안, 평균적으로 하루에 **{avg_good_min:.1f}분** 동안 좋은 자세를, **{avg_bad_min:.1f}분** 동안 나쁜 자세를 유지했습니다.
                 - 이 추세를 통해 장기적인 자세 개선 효과를 확인할 수 있습니다.
                 """)
-    except Exception as e: st.error(f"⚠️ 일일 통계 그래프 오류: {e}")
+    except Exception as e: 
+        st.error(f"⚠️ 일일 통계 그래프 오류: {e}")
+
 
 def create_confusion_matrix_plot(df):
     try:
@@ -323,10 +386,14 @@ def create_confusion_matrix_plot(df):
             """)
     except Exception as e: st.error(f"⚠️ 혼동 행렬 그래프 오류: {e}")
 
-def create_posture_types_chart():
+# [교체] create_posture_types_chart 함수 전체
+def create_posture_types_chart(start_date, end_date):
     """자세 유형별 분석 차트 생성"""
     try:
-        response = requests.get(f"{FLASK_SERVER_URL}/get_posture_types")
+        # [수정] API 호출 시 params로 날짜 전달
+        response = requests.get(f"{FLASK_SERVER_URL}/get_posture_types", 
+                                params={"start_date": start_date, "end_date": end_date})
+        
         if response.status_code == 200:
             posture_stats = response.json()['posture_stats']
             
@@ -343,13 +410,13 @@ def create_posture_types_chart():
                 if chart_data:
                     df_chart = pd.DataFrame(chart_data)
                     fig_pie = px.pie(df_chart, values='횟수', names='자세 유형', 
-                                     title='최근 7일간 자세 유형별 분포',
+                                     title='자세 유형별 분포 (선택 기간)',
                                      color_discrete_sequence=px.colors.qualitative.Set3)
                     fig_pie.update_layout(width=500, height=400)
                     st.plotly_chart(fig_pie, config={'displayModeBar': True})
                     
                     fig_bar = px.bar(df_chart, x='자세 유형', y='횟수', 
-                                     title='자세 유형별 발생 횟수', color='횟수',
+                                     title='자세 유형별 발생 횟수 (선택 기간)', color='횟수',
                                      color_continuous_scale='RdYlBu_r')
                     fig_bar.update_layout(width=600, height=400)
                     st.plotly_chart(fig_bar, config={'displayModeBar': True})
@@ -364,24 +431,28 @@ def create_posture_types_chart():
                             worst_posture = posture_names.get(worst_posture_type, worst_posture_type)
 
                         st.markdown(f"""
-                        이 그래프는 최근 7일간 감지된 **다양한 자세 유형**의 분포를 보여줍니다.
+                        이 그래프는 선택한 기간 동안 감지된 **다양한 자세 유형**의 분포를 보여줍니다.
                         - 가장 많이 발생하는 자세 문제: **{worst_posture}**
                         - 좋은 자세 비율: **{good_ratio:.1f}%**
                         - 개선이 필요한 자세 유형을 파악하여 맞춤형 운동 계획을 세울 수 있습니다.
                         """)
                 else:
-                    st.info("아직 자세 유형 데이터가 없습니다. 실시간 코칭을 사용해보세요!")
+                    st.info("ℹ️ 해당 기간에 자세 유형 데이터가 없습니다. (chart_data 비어있음)")
             else:
-                st.info("아직 자세 유형 데이터가 없습니다. 실시간 코칭을 사용해보세요!")
+                st.info("ℹ️ 해당 기간에 자세 유형 데이터가 없습니다. 실시간 코칭을 사용해보세요!")
         else:
-            st.error("자세 유형 데이터를 불러올 수 없습니다.")
+            st.error("자세 유형 데이터를 불러올 수 없습니다. (서버 응답)")
     except Exception as e:
         st.error(f"자세 유형 분석 오류: {e}")
 
-def create_pattern_analysis_chart():
+# [교체] create_pattern_analysis_chart 함수 전체
+def create_pattern_analysis_chart(start_date, end_date):
     """패턴 분석 리포트 차트 생성"""
     try:
-        response = requests.get(f"{FLASK_SERVER_URL}/analyze_patterns")
+        # [수정] API 호출 시 params로 날짜 전달
+        response = requests.get(f"{FLASK_SERVER_URL}/analyze_patterns", 
+                                params={"start_date": start_date, "end_date": end_date})
+        
         if response.status_code == 200:
             worst_hours = response.json()['worst_hours']
             
@@ -392,9 +463,9 @@ def create_pattern_analysis_chart():
                 
                 df_hours = pd.DataFrame(hours_data)
                 fig = px.bar(df_hours, x='시간대', y='나쁜 자세 횟수', 
-                               title='시간대별 나쁜 자세 발생 빈도 (최근 7일)',
-                               color='나쁜 자세 횟수',
-                               color_continuous_scale='Reds')
+                             title='시간대별 나쁜 자세 발생 빈도 (선택 기간)',
+                             color='나쁜 자세 횟수',
+                             color_continuous_scale='Reds')
                 fig.update_layout(width=600, height=400)
                 st.plotly_chart(fig, config={'displayModeBar': True})
                 
@@ -410,7 +481,7 @@ def create_pattern_analysis_chart():
                 
                 with col1:
                     st.metric("🚨 최악 시간대", f"{worst_hour}시", 
-                               delta=f"{worst_hours[0][1]}회" if worst_hours else "0회")
+                              delta=f"{worst_hours[0][1]}회" if worst_hours else "0회")
                 with col2:
                     st.metric("📉 총 나쁜 자세", f"{total_bad}회")
                 with col3:
@@ -418,21 +489,21 @@ def create_pattern_analysis_chart():
                 
                 with st.expander("💡 패턴 분석 해석"):
                     st.markdown(f"""
-                    **패턴 분석 결과:**
+                    **패턴 분석 결과 (선택 기간):**
                     1. **가장 문제가 많은 시간대**: {worst_hour}시
                        - 이 시간대에 특히 주의가 필요합니다.
-                    2. **총 나쁜 자세 발생**: {total_bad}회 (최근 7일)
+                    2. **총 나쁜 자세 발생**: {total_bad}회 (선택 기간)
                     3. **개선 권장사항**:
                        - {worst_hour}시 1시간 전에 알림을 설정하여 자세를 점검하세요.
                        - 해당 시간대에는 더 자주 스트레칭을 하세요.
                     """)
             else:
-                st.info("아직 충분한 데이터가 없습니다. 더 많은 데이터를 수집한 후 다시 시도해주세요.")
+                st.info("ℹ️ 해당 기간에 충분한 데이터가 없습니다.")
         else:
-            st.error("패턴 분석에 실패했습니다.")
+            st.error("패턴 분석에 실패했습니다. (서버 응답)")
     except Exception as e:
         st.error(f"패턴 분석 오류: {e}")
-# --- [추가] 목표 관리 및 추천을 위한 헬퍼 함수 3개 (파일 상단에 추가) ---
+
 
 def update_goal_status(goal_id, is_active=False):
     """목표의 활성 상태를 변경 (완료 처리)"""
@@ -617,27 +688,66 @@ with tab1:
             st.info("ℹ️ 웹캠을 시작하려면 '▶️ 웹캠 켜기' 버튼을 눌러주세요.")
             
 # --- 자세 분석 리포트 탭 ---
+# [교체] tab2 블록 전체
+# --- 자세 분석 리포트 탭 ---
 with tab2:
     st.header("📊 자세 분석 리포트")
-    st.info("아래 드롭다운 메뉴에서 원하는 분석 결과를 선택하여 당신의 자세 습관과 AI 모델의 성능을 확인하세요.")
     
-    chart_options = ['시간대별 추세', '자세 데이터 개수', 'AI 판단 기준', '일일 통계 (누적)', '모델 성능 분석', '자세 유형별 분석', '패턴 분석 리포트']
+    # --- [신규 추가] 날짜 필터 UI ---
+    st.info("아래에서 기간을 선택하여, 해당 기간의 자세 습관과 AI 모델의 성능을 확인하세요.")
+    
+    col_filter1, col_filter2 = st.columns([0.4, 0.6])
+    with col_filter1:
+        date_option = st.selectbox(
+            "📅 기간 선택:",
+            options=["오늘", "최근 7일", "최근 30일", "이번 달", "지난 달", "전체 기간"],
+            index=2 # 기본값 '최근 30일'
+        )
+    
+    # 선택한 옵션에 따라 날짜 계산
+    start_date, end_date = get_date_range(date_option)
+    
+    with col_filter2:
+        st.caption(f"&nbsp; \n &nbsp; \n 선택된 기간: **{start_date}** ~ **{end_date}**")
+    # --- [신규 추가 완료] ---
+    
+    chart_options = ['일일 통계 (누적)', '자세 유형별 분석', '패턴 분석 리포트', '시간대별 추세', '자세 데이터 개수', 'AI 판단 기준', '모델 성능 분석']
     selected_chart = st.selectbox("분석 차트 선택:", options=chart_options, label_visibility="collapsed")
             
     st.divider()
     
-    df = load_data() # 데이터 로드
+    # [수정] 필터링된 날짜로 학습 데이터를 로드합니다 (차트용)
+    df_filtered = load_data(start_date, end_date) 
     
-    if not df.empty:
-        if selected_chart == '시간대별 추세': create_hourly_line_chart(df)
-        elif selected_chart == '자세 데이터 개수': create_ratio_bar_chart(df)
-        elif selected_chart == 'AI 판단 기준': create_scatter_plot(df)
-        elif selected_chart == '일일 통계 (누적)': create_daily_stacked_bar_chart()
-        elif selected_chart == '모델 성능 분석': create_confusion_matrix_plot(df)
-        elif selected_chart == '자세 유형별 분석': create_posture_types_chart()
-        elif selected_chart == '패턴 분석 리포트': create_pattern_analysis_chart()
-    else:
-        st.warning("⚠️ 분석할 데이터가 없습니다. 'AI 모델 설정' 탭에서 데이터를 먼저 수집해주세요.")
+    if selected_chart == '일일 통계 (누적)':
+        # [수정] 날짜 인자 전달
+        create_daily_stacked_bar_chart(start_date, end_date) 
+        
+    elif selected_chart == '자세 유형별 분석':
+        # [수정] 날짜 인자 전달
+        create_posture_types_chart(start_date, end_date)
+        
+    elif selected_chart == '패턴 분석 리포트':
+        # [수정] 날짜 인자 전달
+        create_pattern_analysis_chart(start_date, end_date)
+        
+    elif selected_chart == '시간대별 추세':
+        # [수정] 필터링된 df 전달 (함수 자체는 수정 불필요)
+        create_hourly_line_chart(df_filtered)
+        
+    elif selected_chart == '자세 데이터 개수':
+        # [수정] 필터링된 df 전달 (함수 자체는 수정 불필요)
+        create_ratio_bar_chart(df_filtered)
+        
+    elif selected_chart == 'AI 판단 기준':
+        # [수정] 필터링된 df 전달 (함수 자체는 수정 불필요)
+        create_scatter_plot(df_filtered)
+        
+    elif selected_chart == '모델 성능 분석':
+        # [수정] 필터링된 df 전달 (함수 자체는 수정 불필요)
+        # (주의: 이 차트는 '모델'의 성능이며, '기간'과는 무관할 수 있음)
+        # (하지만 기간별 데이터로 모델 성능을 보는 것도 의미 있으므로 df_filtered 사용)
+        create_confusion_matrix_plot(df_filtered)
 
 # --- 실시간 AI 코칭 탭 ---
 with tab3:
@@ -735,6 +845,8 @@ with tab3:
 # --- 자세 교정 운동 탭 ---
 # dashboard.py 파일에서 with tab4: 부분을 찾아 아래 코드로 교체하세요.
 
+# --- [교체] 기존 tab4 블록 전체를 아래 코드로 교체 ---
+
 with tab4:
     st.header("🏃‍♂️ 자세 교정 운동 가이드")
     st.info("💡 정기적인 운동으로 자세를 개선하고 건강을 유지하세요. 각 운동은 자세 교정에 특화되어 있습니다.")
@@ -763,14 +875,9 @@ with tab4:
             st.subheader("🎯 운동 시작")
             st.write("운동을 시작하기 전에 준비 운동을 해주세요.")
             
-            if st.button("🔊 음성 안내 시작", use_container_width=True):
-                message = f"{selected_exercise} 운동을 시작합니다. {exercise_data['description']}"
-                if send_voice_feedback(message):
-                    st.success("✅ 음성 안내가 시작되었습니다.")
-                else:
-                    st.warning("⚠️ 음성 안내를 시작할 수 없습니다. 서버를 확인해주세요.")
+            # --- [삭제] "음성 안내 시작" 버튼 로직 제거 ---
             
-            # --- [핵심 수정] 새로운 타이머 상태 관리 ---
+            # --- 타이머 상태 관리 ---
             # 세션 상태 초기화
             if 'timer_status' not in st.session_state:
                 st.session_state.timer_status = 'stopped'  # 'stopped', 'running', 'paused'
@@ -781,7 +888,7 @@ with tab4:
             if 'timer_last_update' not in st.session_state:
                 st.session_state.timer_last_update = 0
 
-            # 1. 사용자 타이머 시간 설정 (요청 사항)
+            # 1. 사용자 타이머 시간 설정
             try:
                 default_minutes = int(exercise_data['duration'].replace('분', ''))
             except:
@@ -797,7 +904,7 @@ with tab4:
                 disabled=(st.session_state.timer_status != 'stopped') 
             )
 
-            # 2. 타이머 제어 버튼 (추천 로직)
+            # 2. 타이머 제어 버튼
             btn_cols = st.columns(3)
             with btn_cols[0]:
                 if st.session_state.timer_status == 'stopped':
@@ -812,7 +919,7 @@ with tab4:
 
             with btn_cols[1]:
                 if st.session_state.timer_status == 'running':
-                    if st.button("⏸️ 일시 중지", use_container_width=True): # (요청한 '중지' 버튼)
+                    if st.button("⏸️ 일시 중지", use_container_width=True):
                         # 현재까지 경과 시간 계산
                         elapsed_since_last = time.time() - st.session_state.timer_last_update
                         st.session_state.timer_remaining_seconds -= elapsed_since_last
@@ -821,7 +928,7 @@ with tab4:
 
             with btn_cols[0]: # 시작 버튼과 동일 위치
                 if st.session_state.timer_status == 'paused':
-                    if st.button("▶️ 다시 시작", use_container_width=True): # (추천한 '재작동' 버튼)
+                    if st.button("▶️ 다시 시작", use_container_width=True):
                         st.session_state.timer_status = 'running'
                         st.session_state.timer_last_update = time.time() # 시간 기준 재설정
                         st.rerun()
@@ -863,8 +970,7 @@ with tab4:
                     if st.session_state.timer_status == 'running':
                         time.sleep(1)
                         st.rerun()
-# --- 목표 설정 & 진행률 탭 ---
-# --- [교체] 기존 tab5 블록 전체를 아래 코드로 교체 ---
+                        
 
 with tab5:
     st.header("🎯 목표 설정 & 진행률 추적")
@@ -1013,10 +1119,6 @@ with tab5:
                         delete_goal(goal_id)
                         st.rerun()
 
-# --- 게임화 대시보드 탭 ---
-# --- [교체] 기존 tab6 블록 전체를 아래 코드로 교체 ---
-
-# --- [교체] 기존 tab6 블록 전체를 이 코드로 교체 ---
 
 with tab6:
     st.header("🏆 웰니스 챌린지 (리워드 프로그램)")
@@ -1157,22 +1259,27 @@ with tab6:
         st.info("Flask 서버를 먼저 실행해주세요. (`streaming_server.py`)")
 
 # --- 스마트 알림 관리 탭 ---
+# [교체] tab7 블록 전체
+# --- 스마트 알림 관리 탭 ---
 with tab7:
     st.header("🔔 스마트 알림 관리")
-    st.info("💡 AI가 분석한 당신의 자세 패턴을 바탕으로 맞춤형 알림을 설정하고 관리하세요.")
+    st.info("💡 AI가 분석한 당신의 자세 패턴을 바탕으로 맞춤형 알림을 설정하고 관리하세요. (패턴 분석은 항상 '최근 7일' 데이터를 기준으로 합니다)")
     
     col1, col2 = st.columns([0.6, 0.4])
     
     with col1:
-        st.subheader("📊 자세 패턴 분석")
+        st.subheader("📊 자세 패턴 분석 (최근 7일)")
         if st.button("🔍 패턴 분석 실행", use_container_width=True):
             try:
-                response = requests.get(f"{FLASK_SERVER_URL}/analyze_patterns")
+                # [수정] tab7은 날짜 필터 없이 항상 '최근 7일' 기준으로 분석
+                # (서버에서 날짜값이 안 넘어오면 기본값 7일로 작동)
+                response = requests.get(f"{FLASK_SERVER_URL}/analyze_patterns") 
+                
                 if response.status_code == 200:
                     worst_hours = response.json()['worst_hours']
                     if worst_hours:
-                        st.success("✅ 패턴 분석이 완료되었습니다!")
-                        st.subheader("🚨 문제가 많은 시간대")
+                        st.success("✅ 최근 7일간의 패턴 분석이 완료되었습니다!")
+                        st.subheader("🚨 문제가 많은 시간대 (최근 7일)")
                         for i, (hour, frequency) in enumerate(worst_hours):
                             st.write(f"{i+1}. **{hour}시**: {frequency}회 나쁜 자세 감지")
                         
@@ -1181,20 +1288,21 @@ with tab7:
                             for hour, freq in worst_hours:
                                 hours_data.append({'시간대': f"{hour}시", '나쁜 자세 횟수': freq})
                             df_hours = pd.DataFrame(hours_data)
-                            fig = px.bar(df_hours, x='시간대', y='나쁜 자세 횟수', title='시간대별 나쁜 자세 발생 빈도', color='나쁜 자세 횟수', color_continuous_scale='Reds')
+                            fig = px.bar(df_hours, x='시간대', y='나쁜 자세 횟수', title='시간대별 나쁜 자세 발생 빈도 (최근 7일)', color='나쁜 자세 횟수', color_continuous_scale='Reds')
                             fig.update_layout(width=500, height=300)
                             st.plotly_chart(fig, config={'displayModeBar': True})
                     else:
-                        st.info("ℹ️ 아직 충분한 데이터가 없습니다. 더 많은 데이터를 수집한 후 다시 시도해주세요.")
+                        st.info("ℹ️ 아직 충분한 데이터가 없습니다. (최근 7일)")
                 else:
                     st.error("⚠️ 패턴 분석에 실패했습니다.")
             except Exception as e:
                 st.error(f"⚠️ 패턴 분석 오류: {e}")
     
     with col2:
-        st.subheader("⚙️ 스마트 알림 설정")
-        if st.button("🔔 스마트 알림 생성", use_container_width=True):
+        st.subheader("⚙️ 스마트 알림 설정 (최근 7일 기준)")
+        if st.button("🔔 스마트 알림 생성", use_container_width=True, help="최근 7일 데이터를 기반으로 알림을 생성합니다."):
             try:
+                # [수정] 알림 생성도 '최근 7일' 고정 (서버에서 자동 처리)
                 response = requests.post(f"{FLASK_SERVER_URL}/create_smart_notifications")
                 if response.status_code == 200:
                     st.success("✅ 스마트 알림이 생성되었습니다!"); st.rerun()

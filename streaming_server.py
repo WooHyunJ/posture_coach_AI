@@ -195,6 +195,29 @@ def get_posture_feedback_message(posture_type):
     }
     return feedback_messages.get(posture_type, "자세를 점검해주세요.")
 
+def show_notification_if_enabled(message):
+    """
+    [신규 헬퍼 함수]
+    알림을 실제로 띄우기 직전에, 토글이 여전히 켜져 있는지
+    '다시 한 번' 확인합니다.
+    """
+    global lock, app_state
+    
+    # 2단계 확인: 알림 스레드가 실행되는 시점에도 토글이 켜져있는가?
+    with lock:
+        is_on = app_state.get('desktop_alert_on', True)
+    
+    if is_on: # 여전히 켜져 있을 때만 팝업을 띄웁니다.
+        try:
+            notification.notify(
+                title='🚨 자세 경고! 🚨',
+                message=message,
+                app_name='AI 자세 교정 코치',
+                timeout=5 
+            )
+        except Exception as e:
+            print(f"🖥️ 데스크탑 알림 팝업 오류: {e}")
+
 def load_user_gamification():
     global user_stats
     try:
@@ -209,7 +232,14 @@ def load_user_gamification():
             }
         else:
             cursor.execute('''INSERT INTO user_gamification (user_level, experience_points, current_streak, best_streak, total_good_minutes, badges) 
-                              VALUES (1, 0, 0, 0, 0, '[]')'''); conn.commit()
+                                VALUES (1, 0, 0, 0, 0, '[]')'''); conn.commit()
+    
+
+            user_stats = {
+                'level': 1, 'experience': 0, 'current_streak': 0,
+                'best_streak': 0, 'total_good_minutes': 0, 'badges': [], 'last_activity': None
+            }
+
         conn.close()
         print(f"🎮 게임화 데이터 로드: 레벨 {user_stats['level']}, 경험치 {user_stats['experience']}")
     except Exception as e:
@@ -257,40 +287,70 @@ def check_and_award_badges():
             user_stats['badges'].append(badge['name'])
             print(f"🏆 배지 획득: {badge['title']} - {badge['description']}")
 
-def analyze_posture_patterns():
+# --- [수정] analyze_posture_patterns가 날짜 범위를 인자로 받도록 변경 ---
+def analyze_posture_patterns(start_date, end_date):
+    """
+    주어진 날짜 범위 내의 자세 패턴을 분석합니다.
+    """
     try:
-        conn = sqlite3.connect('posture_data.db', check_same_thread=False); cursor = conn.cursor()
-        cursor.execute('''SELECT hour, posture_type, COUNT(*) as frequency 
-                          FROM posture_types_log 
-                          WHERE timestamp >= datetime('now', '-7 days')
-                          AND posture_type != 'good_posture'
-                          GROUP BY hour, posture_type ORDER BY frequency DESC''')
+        conn = sqlite3.connect('posture_data.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # [수정] SQL 쿼리가 날짜 범위를 사용하도록 변경
+        # strftime('%H', timestamp)는 시간을 '00', '01'...'23' 형태의 문자열로 반환
+        query = """
+            SELECT strftime('%H', timestamp) as hour, posture_type, COUNT(*) as frequency 
+            FROM posture_types_log 
+            WHERE date(timestamp) BETWEEN ? AND ?
+            AND posture_type != 'good_posture'
+            GROUP BY hour, posture_type 
+            ORDER BY frequency DESC
+        """
+        cursor.execute(query, (start_date, end_date))
+        
         results = cursor.fetchall()
         hour_patterns = {}
-        for hour, posture_type, frequency in results:
-            if hour not in hour_patterns: hour_patterns[hour] = {}
+        for hour_str, posture_type, frequency in results:
+            hour = int(hour_str) # 문자열 '08' -> 숫자 8
+            if hour not in hour_patterns: 
+                hour_patterns[hour] = {}
             hour_patterns[hour][posture_type] = frequency
+            
         worst_hours = []
         for hour, patterns in hour_patterns.items():
             total_bad = sum(patterns.values())
             worst_hours.append((hour, total_bad))
+            
         worst_hours.sort(key=lambda x: x[1], reverse=True)
         conn.close()
-        return worst_hours[:3]
+        return worst_hours[:3] # 상위 3개 시간대 반환
+        
     except Exception as e:
-        print(f"자세 패턴 분석 오류: {e}"); return []
+        print(f"자세 패턴 분석 오류: {e}")
+        return []
 
+# [교체] create_smart_notifications 함수
 def create_smart_notifications():
+    """
+    [수정] 스마트 알림은 항상 '최근 7일' 기준으로 생성하도록 고정
+    """
     try:
-        worst_hours = analyze_posture_patterns()
+        # '최근 7일' 날짜 계산
+        today = datetime.date.today()
+        start_date = (today - datetime.timedelta(days=6)).isoformat()
+        end_date = today.isoformat()
+        
+        # [수정] 7일 기준으로 헬퍼 함수 호출
+        worst_hours = analyze_posture_patterns(start_date, end_date)
+        
         conn = sqlite3.connect('posture_data.db', check_same_thread=False); cursor = conn.cursor()
         cursor.execute('DELETE FROM smart_notifications')
         for hour, frequency in worst_hours:
             alert_hour = hour - 1 if hour > 0 else 23
             cursor.execute('''INSERT INTO smart_notifications (notification_type, trigger_time, is_active) 
-                              VALUES (?, ?, 1)''', ('posture_reminder', f"{alert_hour:02d}:00",))
+                               VALUES (?, ?, 1)''', ('posture_reminder', f"{alert_hour:02d}:00",))
         conn.commit(); conn.close()
-        print(f"🔔 스마트 알림 생성 완료: {len(worst_hours)}개 알림 설정")
+        print(f"🔔 스마트 알림 생성 완료: {len(worst_hours)}개 알림 설정 (최근 7일 기준)")
     except Exception as e:
         print(f"스마트 알림 생성 오류: {e}")
 
@@ -414,15 +474,13 @@ def generate_frames():
                             except Exception as e: print(f"알림음 재생 오류: {e}")
                         
                         if is_desktop_alert_on:
+                        # [수정] 람다(lambda) 대신, 새로 만든 헬퍼 함수를 스레드로 실행
                             try:
-                                threading.Thread(target=lambda: notification.notify(
-                                    title='🚨 자세 경고! 🚨',
-                                    message=feedback_message,
-                                    app_name='AI 자세 교정 코치',
-                                    timeout=5 
-                                ), daemon=True).start()
+                                threading.Thread(target=show_notification_if_enabled, 
+                                               args=(feedback_message,), 
+                                                 daemon=True).start()
                             except Exception as e:
-                                print(f"데스크탑 알림 오류: {e}")
+                                print(f"🖥️ 데스크탑 알림 스레드 생성 오류: {e}")
                         
                         last_alert_time = current_time
                 
@@ -620,19 +678,39 @@ def redeem_reward():
         return jsonify({"status": "error", "message": str(e)}), 500
 # --- [신규 추가 완료] ---
 
+# [교체] /get_posture_types API 함수
 @app.route('/get_posture_types', methods=['GET'])
 def get_posture_types():
     try:
+        # 1. dashboard.py에서 보낸 날짜 값을 받음
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+
+        # 2. 날짜 값이 없으면 '최근 7일'을 기본값으로 사용
+        if not start_date or not end_date:
+            today = datetime.date.today()
+            start_date = (today - datetime.timedelta(days=6)).isoformat()
+            end_date = today.isoformat()
+
         conn = sqlite3.connect('posture_data.db', check_same_thread=False); cursor = conn.cursor()
-        cursor.execute('''SELECT posture_type, COUNT(*) as count 
-                          FROM posture_types_log 
-                          WHERE timestamp >= datetime('now', '-7 days')
-                          GROUP BY posture_type ORDER BY count DESC''')
+        
+        # 3. [수정] SQL 쿼리가 날짜 범위를 사용하도록 변경
+        query = """
+            SELECT posture_type, COUNT(*) as count 
+            FROM posture_types_log 
+            WHERE date(timestamp) BETWEEN ? AND ?
+            GROUP BY posture_type 
+            ORDER BY count DESC
+        """
+        cursor.execute(query, (start_date, end_date))
+        
         results = cursor.fetchall()
         posture_stats = {row[0]: row[1] for row in results}
         conn.close()
         return jsonify({"status": "success", "posture_stats": posture_stats})
-    except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
+        
+    except Exception as e: 
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/create_smart_notifications', methods=['POST'])
 def create_smart_notifications_endpoint():
@@ -653,12 +731,27 @@ def get_smart_notifications():
         return jsonify({"status": "success", "notifications": notification_list})
     except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
 
+# [교체] /analyze_patterns API 함수
 @app.route('/analyze_patterns', methods=['GET'])
 def analyze_patterns():
     try:
-        worst_hours = analyze_posture_patterns()
+        # 1. dashboard.py에서 보낸 날짜 값을 받음
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+
+        # 2. 날짜 값이 없으면 (예: tab7) '최근 7일'을 기본값으로 사용
+        if not start_date or not end_date:
+            today = datetime.date.today()
+            start_date = (today - datetime.timedelta(days=6)).isoformat()
+            end_date = today.isoformat()
+            
+        # 3. [수정] 헬퍼 함수에 날짜 인자 전달
+        worst_hours = analyze_posture_patterns(start_date, end_date)
+        
         return jsonify({"status": "success", "worst_hours": worst_hours})
-    except Exception as e: return jsonify({"status": "error", "message": str(e)}), 500
+        
+    except Exception as e: 
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 
