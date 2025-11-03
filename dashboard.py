@@ -646,8 +646,14 @@ with tab1:
             if st.button("🧠 AI 모델 학습 실행"): train_and_save_model()
             st.info("💡 학습 후에는 아래 '모델 새로고침' 버튼을 꼭 눌러 서버에 새 모델을 적용해야 합니다.")
             if st.button("🔄 모델 새로고침"):
-                try: requests.post(f"{FLASK_SERVER_URL}/reload_model"); st.success("✅ 서버 모델 새로고침 완료!")
-                except: st.error("⚠️ 서버 연결 실패")
+                 with st.spinner("⏳ 서버에 새 모델을 적용하는 중..."):
+                    # [핵심 수정] 파일 I/O(쓰기/읽기) 충돌을 피하기 위해 1초 대기
+                     time.sleep(1) 
+                     try:
+                        requests.post(f"{FLASK_SERVER_URL}/reload_model")
+                        st.success("✅ 서버 모델 새로고침 완료!")
+                     except: 
+                        st.error("⚠️ 서버 연결 실패")
 
             # --- [신규 추가] 자동 재학습 및 평가 버튼 ---
             st.divider()

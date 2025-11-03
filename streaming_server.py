@@ -448,23 +448,40 @@ def generate_frames():
                 else:
                     prediction_result = 0 # 좋음
                     
-                last_prediction = prediction_result
-                
-                detected_posture_type, confidence = detect_posture_type(landmarks)
-                is_good_posture = (detected_posture_type == 'good_posture')
-                save_posture_type_to_db(detected_posture_type, confidence, landmarks)
-                update_user_gamification(detected_posture_type, is_good_posture)
-                
-                if prediction_result == 0 and is_good_posture:
+
+                # ... (AI가 prediction_result를 0 또는 1로 예측하는 부분) ...
+
+                last_prediction = prediction_result # AI의 판단을 통계 스레드로 전달
+
+
+
+                # 1. AI가 "좋음(0)"이라고 판단한 경우
+                if prediction_result == 0:
                     status_text = "Good Posture"; skeleton_color = (0, 255, 0)
+ 
+                     # 통계 및 게임화: "좋음"으로 기록 (AI 판단 기준)
+                    save_posture_type_to_db('good_posture', 1.0, landmarks)
+                    update_user_gamification('good_posture', True)
+
+                # 2. AI가 "나쁨(1)"이라고 판단한 경우
                 else:
+                    # AI가 "나쁨"이라고 했으므로, "왜" 나쁜지 규칙 기반으로 분석
+                    detected_posture_type, confidence = detect_posture_type(landmarks)
+
+                    # (예외 처리) 규칙 기반이 못 찾으면 '거북목'으로 통일
                     if detected_posture_type == 'good_posture':
                         detected_posture_type = 'forward_head' 
-                    
+
+                    # 통계 및 게임화: "나쁨"으로 기록 (AI 판단 기준)
+                    save_posture_type_to_db(detected_posture_type, confidence, landmarks)
+                    update_user_gamification(detected_posture_type, False)
+
+                    # 경고 문구 및 알림 표시
                     feedback_message = get_posture_feedback_message(detected_posture_type)
                     status_text = f"WARNING: {detected_posture_type.replace('_', ' ').title()}!"
                     skeleton_color = (0, 0, 255)
 
+                    # 알림 쿨다운 체크 및 실행
                     current_time = time.time()
                     if current_time - last_alert_time > cooldown_seconds:
                         if is_sound_on:
@@ -472,20 +489,21 @@ def generate_frames():
                                 threading.Thread(target=lambda: playsound('alert.mp3')).start()
                                 speak_text(feedback_message)
                             except Exception as e: print(f"알림음 재생 오류: {e}")
-                        
+
                         if is_desktop_alert_on:
-                        # [수정] 람다(lambda) 대신, 새로 만든 헬퍼 함수를 스레드로 실행
                             try:
                                 threading.Thread(target=show_notification_if_enabled, 
-                                               args=(feedback_message,), 
-                                                 daemon=True).start()
+                                                 args=(feedback_message,), 
+                                                    daemon=True).start()
                             except Exception as e:
                                 print(f"🖥️ 데스크탑 알림 스레드 생성 오류: {e}")
-                        
+
                         last_alert_time = current_time
-                
+
+                    # 3. 스마트 알림 체크 (매분 1회 실행)
                 if int(time.time()) % 60 == 0:
                     check_smart_notifications()
+            
             
             elif current_mode == 'collect' and time.time() < end_time:
                 save_to_db(landmarks, current_label)
