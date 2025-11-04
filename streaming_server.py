@@ -117,12 +117,20 @@ mp_drawing = mp.solutions.drawing_utils
 
 # --- DB 관련 함수 ---
 # [교체] init_db 함수 전체
+# [교체] init_db 함수 전체
 def init_db():
     conn = sqlite3.connect('posture_data.db', check_same_thread=False)
     cursor = conn.cursor()
     
     # --- [유지] 현재 사용 중인 테이블 6개 ---
-    cursor.execute(''' CREATE TABLE IF NOT EXISTS posture_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, right_ear_x REAL, right_ear_y REAL, right_shoulder_x REAL, right_shoulder_y REAL, label INTEGER) ''')
+    cursor.execute(''' CREATE TABLE IF NOT EXISTS posture_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        timestamp DATETIME NOT NULL, 
+        right_ear_x REAL, right_ear_y REAL, 
+        right_shoulder_x REAL, right_shoulder_y REAL, 
+        label INTEGER,
+        source TEXT DEFAULT 'initial'  -- [신규 추가]
+    ) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS daily_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT UNIQUE NOT NULL, good_seconds INTEGER NOT NULL, bad_seconds INTEGER NOT NULL) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS posture_types_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp DATETIME NOT NULL, posture_type TEXT NOT NULL, confidence REAL NOT NULL, landmarks_data TEXT NOT NULL) ''')
     cursor.execute(''' CREATE TABLE IF NOT EXISTS user_gamification (id INTEGER PRIMARY KEY AUTOINCREMENT, user_level INTEGER DEFAULT 1, experience_points INTEGER DEFAULT 0, current_streak INTEGER DEFAULT 0, best_streak INTEGER DEFAULT 0, total_good_minutes INTEGER DEFAULT 0, badges TEXT DEFAULT '[]', last_activity DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP) ''')
@@ -134,11 +142,22 @@ def init_db():
     conn.close()
 
 
-def save_to_db(landmarks, label):
+# [교체] save_to_db 함수 전체
+def save_to_db(landmarks, label, source='initial'): # [수정] source 인자 추가
     conn = sqlite3.connect('posture_data.db', check_same_thread=False)
     cursor = conn.cursor()
-    data = (datetime.datetime.now(), landmarks[mp_pose.PoseLandmark.RIGHT_EAR.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_EAR.value].y, landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y, label)
-    cursor.execute('INSERT INTO posture_log (timestamp, right_ear_x, right_ear_y, right_shoulder_x, right_shoulder_y, label) VALUES (?, ?, ?, ?, ?, ?)', data)
+    data = (datetime.datetime.now(), 
+            landmarks[mp_pose.PoseLandmark.RIGHT_EAR.value].x, 
+            landmarks[mp_pose.PoseLandmark.RIGHT_EAR.value].y, 
+            landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].x, 
+            landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value].y, 
+            label, 
+            source) # [수정] source 값 추가
+    
+    # [수정] 쿼리문 변경 (7개 컬럼)
+    cursor.execute('''INSERT INTO posture_log 
+                      (timestamp, right_ear_x, right_ear_y, right_shoulder_x, right_shoulder_y, label, source) 
+                      VALUES (?, ?, ?, ?, ?, ?, ?)''', data)
     conn.commit()
     conn.close()
 
@@ -625,6 +644,7 @@ def get_user_stats():
     return jsonify({"status": "success", "stats": user_stats})
 
 # --- [신규 추가] Human-in-the-Loop 피드백 저장 API ---
+# [교체] /save_feedback API 함수 전체
 @app.route('/save_feedback', methods=['POST'])
 def save_feedback():
     global last_seen_landmarks
@@ -639,10 +659,10 @@ def save_feedback():
             if last_seen_landmarks is None:
                 return jsonify({"status": "error", "message": "No landmarks captured yet"}), 400
             
-            # (중요) 현재 랜드마크와 "사용자가 알려준 정답(label)"을 학습DB에 저장
-            save_to_db(last_seen_landmarks, label) 
+            # [수정] source='hil_feedback'으로 저장
+            save_to_db(last_seen_landmarks, label, source='hil_feedback') 
         
-        print(f"✅ Human-in-the-Loop 피드백 저장 완료: Label={label}")
+        print(f"✅ HIL 피드백 저장 완료: Label={label} (가중치 높음)")
         return jsonify({"status": "success", "message": f"Feedback {label} saved"})
         
     except Exception as e:
