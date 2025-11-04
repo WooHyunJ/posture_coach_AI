@@ -13,7 +13,7 @@ import datetime
 from datetime import date # [신규 추가]
 from dateutil.relativedelta import relativedelta # [신규 추가]
 import numpy as np # Confusion Matrix 라벨링 위해 추가
-from imblearn.over_sampling import SMOTE # [신규 추가]
+
 from collections import Counter # [신규 추가]
 
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
@@ -252,76 +252,67 @@ def load_data(start_date=None, end_date=None):
         st.error(f"⚠️ 데이터베이스 로딩 중 오류가 발생했습니다: {e}")
         return pd.DataFrame()
 
-# [교체] train_and_save_model 함수 전체 (이상탐지, 오버샘플링 적용)
-def train_and_save_model():
-    df = load_data() # 1. 모든 데이터 로드 (피드백 포함)
-    
-    if len(df) < 50: # 데이터가 너무 적으면 중지
-        st.warning("⚠️ 모델 학습을 위해 최소 50개 이상의 데이터가 필요합니다."); return
-    if len(df['label'].unique()) < 2:
-        st.warning("⚠️ 좋은 자세(0)와 나쁜 자세(1) 데이터가 모두 필요합니다."); return
 
-    with st.spinner("⏳ AI 모델 학습을 시작합니다... (1/5)"):
-        # --- 2. 특성 공학 ---
+def train_and_save_model():
+    df = load_data() # (posture_log DB에서 'source' 컬럼 포함 로드)
+    
+    if len(df) < 50 or len(df['label'].unique()) < 2:
+        st.warning("⚠️ 모델 학습을 위해 좋은 자세(0)와 나쁜 자세(1) 데이터가 각각 최소 25개 이상 필요합니다."); return
+
+    # [수정] 3단계로 구성
+    with st.spinner("⏳ (1/3) AI 모델 학습을 시작합니다..."): 
         df['shoulder_ear_diff_x'] = df['right_shoulder_x'] - df['right_ear_x']
         features = ['right_ear_x', 'right_ear_y', 'right_shoulder_x', 'right_shoulder_y', 'shoulder_ear_diff_x']
-        X = df[features]; y = df['label']
         
-        st.info(f"✅ (1/5) 총 {len(df)}개 데이터 로드 완료.")
+        
+        df_cleaned = df.copy() 
+        st.success("🤖 (1/3) 데이터 로드 완료 ") # [수정] 1/3
+        # --- [수정 완료] ---
 
-    with st.spinner("⏳ (2/5) 악의적 데이터(이상치) 제거 중..."):
-        # --- 3. [신규] 이상탐지 (IsolationForest) 적용 ---
-        # "contamination=0.05" -> 전체 데이터 중 5%를 이상치로 간주하여 제거
-        iso = IsolationForest(contamination=0.05, random_state=42)
-        y_iso = iso.fit_predict(X)
-        
-        # -1이 이상치, 1이 정상 데이터
-        mask = (y_iso == 1) 
-        X_clean = X[mask]
-        y_clean = y[mask]
-        
-        removed_count = len(X) - len(X_clean)
-        st.info(f"✅ (2/5) 이상치 {removed_count}개 제거 완료! (총 {len(X_clean)}개 데이터 사용)")
+        # [수정] SMOTE 대신, 'source' 컬럼을 분리
+        X = df_cleaned[features]
+        y = df_cleaned['label']
+        sources = df_cleaned['source'] # HIL 가중치를 위해 'source' 컬럼 사용
 
-    with st.spinner("⏳ (3/5) 학습/테스트 데이터 분리 중..."):
-        # --- 4. 훈련/테스트 데이터 분리 ---
-        # (주의!) 오버샘플링 전에 반드시 데이터를 분리해야 함
-        X_train, X_test, y_train, y_test = train_test_split(X_clean, y_clean, test_size=0.2, random_state=42, stratify=y_clean)
+    with st.spinner("⏳ (2/3) AI 모델을 훈련하는 중..."): # [수정] 2/3
+        # 1. 클래스 불균형 (좋음 vs 나쁨) -> 'class_weight'로 해결
+        label_counts = y.value_counts()
+        good_count = label_counts.get(0, 0)
+        bad_count = label_counts.get(1, 0)
+        st.info(f"🤖 데이터 구성: 좋음({good_count}) / 나쁨({bad_count}).")
         
-        st.info(f"✅ (3/5) 학습 데이터: {len(X_train)}개, 테스트 데이터: {len(X_test)}개")
+        # 2. HIL 가중치 (교과서 vs 오답노트) -> 'sample_weight'로 해결
+        # [수정] 'source' 컬럼도 함께 8:2로 분할
+        X_train, X_test, y_train, y_test, sources_train, sources_test = train_test_split(
+            X, y, sources, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        WEIGHT_MULTIPLIER = 100 # (오답 노트 가중치: 100배)
+        
+        # 훈련 데이터(X_train)에 맞춰 가중치 배열 생성
+        # 'hil_feedback' 소스면 100배, 'initial' 소스면 1배
+        sample_weights = sources_train.apply(lambda s: WEIGHT_MULTIPLIER if s == 'hil_feedback' else 1).to_numpy()
+        
+        hil_count_in_train = (sources_train == 'hil_feedback').sum()
+        if hil_count_in_train > 0:
+             st.info(f"💡 HIL 피드백(오답노트) {hil_count_in_train}개에 {WEIGHT_MULTIPLIER}배 가중치를 적용합니다.")
+        # --- [신규 기능 완료] ---
 
-    with st.spinner("⏳ (4/5) 데이터 불균형 해소(Oversampling) 중..."):
-        # --- 5. [신규] 오버샘플링 (SMOTE) 적용 ---
-        # (주의!) 훈련 데이터(X_train, y_train)에만 적용해야 함
+ 
+        # 1. class_weight='balanced': (좋음 vs 나쁨) 불균형 자동 해결
+        model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
         
-        # 불균형 데이터 개수 확인
-        st.info(f"Oversampling 전 (학습 데이터): {Counter(y_train)}")
+        # 2. sample_weight=sample_weights: 'HIL 데이터'에 가중치 적용
+        model.fit(X_train, y_train, sample_weight=sample_weights)
         
-        # SMOTE 적용
-        try:
-            smote = SMOTE(random_state=42)
-            X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
-            st.info(f"Oversampling 후 (학습 데이터): {Counter(y_train_res)}")
-        except ValueError as e:
-            # (예외처리) 한쪽 라벨 데이터가 너무 적어(예: 5개 미만) SMOTE가 실패할 경우
-            st.warning(f"⚠️ 오버샘플링(SMOTE) 실패: {e}. 원본 데이터로 학습합니다.")
-            X_train_res, y_train_res = X_train, y_train # 원본 사용
-
-    with st.spinner("⏳ (5/5) AI 모델 학습 및 평가 중..."):
-        # --- 6. 모델 학습 및 저장 ---
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
-        
-        # [수정] SMOTE로 처리된 데이터로 학습
-        model.fit(X_train_res, y_train_res) 
-        
-        # [유지] 평가는 원본 테스트 데이터(X_test)로 수행
+        # --- 평가 ---
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
         
         joblib.dump(model, 'posture_model.joblib')
+        st.success(f"✅ (2/3) AI 모델 학습 완료! (예측 정확도: {accuracy * 100:.2f}%)") # [수정] 2/3
         
-        st.success(f"✅ AI 모델 학습 완료! (예측 정확도: {accuracy * 100:.2f}%)")
-        st.info("💡 '모델 새로고침' 버튼을 눌러 서버에 적용하세요!")
+    # (3/3) 단계는 "🚀 자동 재학습" 버튼이 담당하도록 이 함수에서는 뺌.
        
 # --- 데이터 시각화 함수들 (Plotly 크기 직접 지정 + config 추가) ---
 def create_hourly_line_chart(df):
@@ -691,26 +682,20 @@ with tab1:
             
             if st.button("🚀 최신 피드백으로 AI 자동 재학습/평가", use_container_width=True):
                 
-                # 1. 모든 데이터 불러오기 (초기 데이터 + 피드백 데이터)
-                with st.spinner("⏳ (1/4) 모든 학습 데이터를 불러오는 중..."):
-                    df = load_data()
-                    if df.empty or len(df) < 50:
-                        st.error("⚠️ 데이터가 부족합니다. '좋은/나쁜 자세' 데이터를 더 수집해주세요.")
-                        st.stop() # 작업 중단
-                    
-                    st.success(f"✅ 총 {len(df)}개의 학습 데이터를 불러왔습니다.")
-        
+                # [수정] 1, 2단계 실행 (데이터 로드, 가중치 적용, 학습, .joblib 저장)
+                # (이 함수는 내부적으로 스피너와 (1/3), (2/3) 메시지를 포함)
                 train_and_save_model() 
                 
-
-                # 4. 서버에 새 모델 적용
-                with st.spinner("⏳ (4/4) 똑똑해진 새 모델을 서버에 적용 중..."):
+                # [수정] 3단계: 서버에 새 모델 적용
+                with st.spinner("⏳ (3/3) 똑똑해진 새 모델을 서버에 적용 중..."): # [수정] 3/3
                     try:
+                        time.sleep(1) # 파일 I/O 충돌 방지
                         requests.post(f"{FLASK_SERVER_URL}/reload_model")
-                        st.success("✅ 모든 작업 완료! 서버에 새 모델이 적용되었습니다.")
+                        st.success("✅ (3/3) 모든 작업 완료! 서버에 새 모델이 적용되었습니다.") # [수정] 3/3
                         st.balloons()
                     except Exception as e:
                         st.error("⚠️ 서버에 새 모델 적용을 실패했습니다. 서버를 확인하세요.")
+            # --- [수정 완료] ---
             # --- [신규 추가 완료] ---
         else:
             st.info("ℹ️ 데이터 수집 및 모델 학습을 위해 먼저 웹캠을 켜주세요.")
